@@ -1,3 +1,8 @@
+---
+output:
+  pdf_document: default
+  html_document: default
+---
 #Examining Political Contributions in New Jersey During the 2016 Election Cycle  
 by Chad Horner
 ========================================================
@@ -28,7 +33,10 @@ library(ggmap) #for map/zipcode
 
 ```{r load}
 # data source: http://fec.gov/disclosurep/pnational.do
-setwd('/Users/chadhorner/Documents/OneDrive/Udacity/P4')
+setwd(paste('/Users/chadhorner/Documents/OneDrive/Udacity/',
+            'Udacity Data Analyst Nanodegree/',
+            'udacity-data-analyst-nanodegree/',
+            'P4 Data Analysis with R', sep = ''))
 newjersey = read.csv('newjersey.csv')
 newjersey$X. = NULL #eliminate extra column
 ```
@@ -173,7 +181,7 @@ The dataset doesn't contain much information on the individual contributors asid
 
 ```{r income}
 #read in income data and subset to newjersey
-income <- read.csv('zipcode2014/14zpallnoagi.csv')
+income <- read.csv('14zpallnoagi.csv')
 njincome <- subset(income, STATE == 'NJ')
 #read in zip code data
 zipcodes <- read.csv('censuszipcode.csv')
