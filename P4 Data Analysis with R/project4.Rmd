@@ -1,0 +1,772 @@
+---
+output:
+  html_document: default
+  pdf_document: default
+---
+TITLE by YOUR_NAME_HERE
+========================================================
+
+```{r global_options, include = FALSE}
+knitr::opts_chunk$set(echo=FALSE) #set echo to FALSE for all code chunks
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, packages}
+# Load all of the packages that you end up using
+# in your analysis in this code chunk.
+
+# Notice that the parameter "echo" was set to FALSE for this code chunk.
+# This prevents the code from displaying in the knitted HTML output.
+# You should set echo=FALSE for all code chunks in your file.
+
+library(ggplot2)
+library(dplyr)
+library(scales)
+library(gender)
+library(genderdata)
+library(hash) #using for gender stuff
+```
+
+```{r echo=FALSE, Load_the_Data}
+# Load the Data
+# data source: http://fec.gov/disclosurep/pnational.do
+setwd('/Users/chadhorner/Documents/OneDrive/Udacity/P4')
+newjersey = read.csv('newjersey.csv')
+newjersey$X. = NULL #eliminate extra column
+attach(newjersey) #make each column its own variable
+```
+
+```{r echo=FALSE, initial_examination}
+names(newjersey)
+# cand_id/cand_nm: id/name of candidate
+# contbr_name: name of donor
+# contbr_city: city of donor (could be interesting)
+# contbr_zip: zip code of donor (can probably get certain data by zip)
+# contbr_employer/contbr_occupation: this can definitely be useful
+# contb_receipt_amt/contb_receipt_dt: info on donations
+# type of form: SA17A (individual donation), SB28A (refund to individual), SA18 (transfer from authorized committee)
+# election_tp: G2016 or P2016 (general/primary)
+```
+```{r Cities}
+#just a model for getting data on a specific city
+Newton = newjersey[contbr_city == 'NEWTON',]
+```
+
+```{r subsetting}
+#subsetting to primary/general 2016 elections (don't want 2020 data)
+newjersey = subset(newjersey, 
+                     election_tp == 'G2016' | 
+                       election_tp == 'P2016')
+```
+
+```{r candidates}
+#function to rename candidates
+candidate_rename <- function(candidate) {
+  pos <- regexpr(',', candidate)[1] #find position of comma
+  return(substr(candidate, 1, pos-1))
+}
+
+newjersey['cand_nm'] <- apply(newjersey['cand_nm'], 1, candidate_rename)
+
+newjersey$cand_nm <- factor(newjersey$cand_nm)
+
+#histogram of entries for each candidate faceted by general/primary election
+ggplot(aes(x = cand_nm), 
+       data = newjersey) +
+  geom_histogram(stat = 'count') +
+  facet_wrap(~election_tp)
+
+#histogram of entries for each candidate colored according to general/primary election
+ggplot(aes(x = cand_nm), 
+       data = subset(newjersey, 
+                     election_tp == 'G2016' | 
+                       election_tp == 'P2016')) +
+  geom_histogram(stat = 'count', aes(color = election_tp,
+                                     fill = election_tp))
+
+#bar graph of total contributions to each candidate
+by_candidate <- group_by(newjersey, cand_nm)
+contb_totals <- summarise(by_candidate,
+                          total = sum(contb_receipt_amt),
+                          n = n())
+
+ggplot(aes(x = cand_nm, y = total), 
+       data = contb_totals) +
+  geom_bar(stat = 'identity') +
+  scale_y_continuous(labels = comma)
+
+#bar graph of total contributions to each candidate split out by general/primary elections
+by_candidate_election <- group_by(newjersey, cand_nm, election_tp)
+contb_totals_election <- summarise(by_candidate_election,
+                                   total = sum(contb_receipt_amt),
+                                   n = n())
+
+ggplot(aes(x = cand_nm, y = total, fill = election_tp), 
+       data = contb_totals_election) +
+  geom_bar(stat = 'identity', position = position_dodge()) + 
+  scale_y_continuous(labels = comma)
+
+#examining median donation by candidate, labeling the total # of donations. only looking at primary donations. 
+contb_stats <- summarise(by_candidate_election,
+                         total = sum(contb_receipt_amt),
+                         mean = mean(contb_receipt_amt),
+                         median = mean(contb_receipt_amt),
+                         n = n())
+
+ggplot(aes(x = cand_nm, y = median, label = n, fill = log(n)), 
+       data = subset(contb_stats, n > 10 & election_tp == 'P2016')) + #primaries only, add # of contributions above bars
+  geom_bar(stat = 'identity', position = position_dodge()) + 
+  scale_y_continuous(labels = comma) + 
+  geom_text(aes(y = median + 100)) + 
+  scale_fill_continuous(low = 'darkgoldenrod2', high = 'midnightblue') #color scale according to number of donations 
+
+```
+
+```{r new variables}
+#candidate gender
+assign_candidate_gender <- function(candidate) {
+  gender <- 'M'
+  if ((candidate == 'Clinton') | (candidate == 'Fiorina')) {
+    gender <- 'F'
+  } 
+  return(gender)
+}
+
+newjersey$cand_gender <- factor(apply(newjersey['cand_nm'], 1,
+                                      assign_candidate_gender))
+
+#candidate party
+assign_candidate_party <- function(candidate) {
+  if (candidate == 'Johnson') {
+    return('Libertarian')
+  } else if (candidate == 'Stein') {
+    return('Green')
+  } else if (candidate == 'McMullin') {
+    return('Independent')
+  } else if (candidate %in% c('Clinton', 'Sanders', 'O\'Malley', 
+                              'Webb', 'Lessig')) {
+    return('Democratic')
+  } else {
+    return('Republican')
+  }
+}
+
+newjersey$cand_party <- factor(apply(newjersey['cand_nm'], 1,
+                                     assign_candidate_party))
+
+#contributor gender
+get_first_name <- function(contrib) {
+  pos <- regexpr(',', contrib)[1] #find position of comma
+  first <- substr(contrib, pos + 2, nchar(contrib))
+  space <- regexpr(' ', first)[1] #in cases with space in name
+  if (space > -1) {
+    first <- substr(first, 1, space-1)
+  }
+  return(first)
+}
+  
+assign_contrib_gender <- function(contrib) {
+  year_min = 1932 #default
+  year_max = 1998 #2016 - 18 years (nobody younger than this is giving money)
+  name = get_first_name(toString(contrib))
+  return(gender(name, years = c(year_min, year_max))$gender)
+}
+
+assign_contrib_gender_firstname <- function(contrib_firstname) {
+  year_min = 1932 #default
+  year_max = 1998 #2016 - 18 years (nobody younger than this is giving money)
+  return(gender(contrib_firstname, years = c(year_min, year_max))$gender)
+}
+
+#newjersey$contbr_gender <- factor(apply(newjersey['contbr_nm'], 1, 
+#                                        assign_contrib_gender))
+
+```
+
+
+```{r employers}
+#creating subsets of data based on employers
+universities <- c('RUTGERS UNIVERSITY', 'PRINCETON UNIVERSITY')
+banks <- c('JPMORGAN CHASE', 'MORGAN STANLEY', 'BANK OF AMERICA', 
+           'CITIGROUP')
+pharma <- c('NOVARTIS', 'JOHNSON & JOHNSON', 'BAYER')
+tech <- c('GOOGLE', 'FACEBOOK', 'MICROSOFT')
+
+#only want to look at primaries for this study
+primaries <- subset(newjersey, election_tp == 'P2016')
+
+univ_donors <- subset(primaries, contbr_employer %in% universities)
+bank_donors <- subset(primaries, contbr_employer %in% banks)
+pharma_donors <- subset(primaries, contbr_employer %in% pharma)
+tech_donors <- subset(primaries, contbr_employer %in% tech)
+
+#looking at donors who are employed by the state's two 'largest' universities, Rutgers and Princeton. we would expect more of a liberal bent here
+ggplot(aes(x = cand_nm), 
+       data = univ_donors) +
+  geom_histogram(stat = 'count')
+
+#hahahahaahah
+
+#now for banks - expect more Republican
+ggplot(aes(x = cand_nm), 
+       data = bank_donors) +
+  geom_histogram(stat = 'count') +
+  facet_wrap(~election_tp)
+
+#slightly i guess, but not as stark - still predominantly for Clinton
+
+#pharma also should, in theory, skew Republican. but perhaps not Trump
+ggplot(aes(x = cand_nm), 
+       data = pharma_donors) +
+  geom_histogram(stat = 'count') +
+  facet_wrap(~election_tp)
+
+#not much to see here once again... two ideas. first, want to look at $$, instead of number of donations. second, perhaps this is just an employed vs. unemployed situation? 
+
+by_candidate <- group_by(bank_donors, cand_nm)
+contb_totals <- summarise(by_candidate,
+                                   total = sum(contb_receipt_amt),
+                                   n = n())
+
+ggplot(aes(x = cand_nm, y = total), 
+       data = contb_totals) +
+  geom_bar(stat = 'identity', position = position_dodge()) + 
+  scale_y_continuous(labels = comma)
+
+#tested with pharma
+
+#want to see proportion of total donations given to each candidate
+by_candidate <- group_by(pharma_donors, cand_nm, election_tp)
+contb_totals <- summarise(by_candidate,
+                                   total = sum(contb_receipt_amt),
+                                   n = n())
+
+ggplot(aes(x = cand_nm, y = total/sum(total)), 
+       data = contb_totals_election) +
+  geom_bar(stat = 'identity', position = position_dodge()) + 
+  scale_y_continuous(labels = comma)
+
+#want to see proportion for each industry plotted together
+add_proportion <- function(totals) {
+  totals$proportion <- totals$total/sum(totals$total)
+  return(totals)
+}
+
+#prep by-industry data
+get_industry_totals <- function(industry_data, industry) {
+  by_candidate <- group_by(industry_data, cand_nm)
+  industry_totals <- summarise(by_candidate,
+                            total = sum(contb_receipt_amt),
+                            n = n(),
+                            industry = industry)
+  return(add_proportion(industry_totals))
+}
+
+univ_donors2 <- get_industry_totals(univ_donors, 'univ')
+bank_donors2 <- get_industry_totals(bank_donors, 'bank')
+pharma_donors2 <- get_industry_totals(pharma_donors, 'pharma')
+tech_donors2 <- get_industry_totals(tech_donors, 'tech')
+
+industries <- rbind(univ_donors2, bank_donors2, pharma_donors2, tech_donors2)
+
+ggplot(aes(x = cand_nm, y = proportion, fill = industry),
+       data = industries) + 
+  geom_bar(stat = 'identity', position = position_dodge())
+
+#what do we see here? i think there are a few conclusions we can draw. 
+#1: the proportion of donations going to Clinton are *remarkably* consistent across the four industry grouips. in all cases it is between 65 and 75%. 
+#2: workers at the big banks are outliers in two ways: first, they give a far higher proportion to the Republican candidates (particularly Bush and Christie - note Christie is probably a bit of a special case here since we are exmaining only New Jersey voters). second, they give a far *lower* proportion to Bernie Sanders; this makes perfect sense: there was no bigger enemy of the banks in the campaign than Sanders, who had the most consistently populist message of all of the significant candidates. 
+#3: a couple of fun outliers worth noting: about 5% of tech money went to Larry Lessig, a thoroughly inconsequential candidate who likely drew most of his support from the technocratic class (he's a Harvard professor). also, John Kasich's only donations in this subset of the data came from tech workers! 
+
+```
+
+```{r cities}
+by_city <- group_by(newjersey, contbr_city, cand_party)
+city_totals <- summarise(by_city,
+                                   total = sum(contb_receipt_amt),
+                                   n = n())
+
+#examining data:
+republican_cities <- subset(city_totals, cand_party == 'Republican')
+republican_cities <- republican_cities[order(-republican_cities$n),]
+democratic_cities <- subset(city_totals, cand_party == 'Democratic')
+democratic_cities <- democratic_cities[order(-democratic_cities$n),]
+
+princeton <- subset(primaries, contbr_city == 'PRINCETON')
+morristown <- subset(primaries, contbr_city == 'MORRISTOWN')
+toms_river <- subset(primaries, contbr_city == 'TOMS RIVER')
+bayonne <- subset(primaries, contbr_city == 'BAYONNE')
+
+get_city_totals <- function(city_data, city) {
+  by_candidate <- group_by(city_data, cand_nm)
+  industry_totals <- summarise(by_candidate,
+                            total = sum(contb_receipt_amt),
+                            n = n(),
+                            city = city)
+  return(add_proportion(industry_totals))
+}
+
+princeton2 <- get_city_totals(princeton, 'Princeton')
+morristown2 <- get_city_totals(morristown, 'Morristown')
+toms_river2 <- get_city_totals(toms_river, 'Toms River')
+bayonne2 <- get_city_totals(bayonne, 'Bayonne')
+
+cities <- rbind(princeton2, morristown2, toms_river2, bayonne2)
+
+ggplot(aes(x = cand_nm, y = proportion, fill = city),
+       data = cities) + 
+  geom_bar(stat = 'identity', position = position_dodge())
+
+#for this study, we're examining contributions from four cities/towns in New Jersey, each representing a different archetype:
+# - Princeton: a distincly politically active town, first in the state in terms of total money contributed and money contributed to Democrats
+# - Morristown: had the highest $ amount of contributions to Republicans and a roughly equivalent amount given to Democrats
+# - Bayonne: had a high number of low-$ amount donations
+# - Toms River: by far the highest number of Republican contributions
+
+#a few conclusions/observations:
+#1: Bayonne, the city that had a disproportionately high number of small contributions, had a much higher % of its total going to Bernie Sanders, who was known throughout the primaries as the leading receiver of small contributions. for Republicans in Bayonne, almost all of the money went to Christie.
+#2: Toms River was the only city that gave a notable percentage to Trump (about 15% of contributions); about half of the money went to Christie, with less than 10% going to Ms. Clinton or Mr. Sanders. 
+#3: As noted earlier, Morristown has a pretty even split: Mr. Christie received nearly half of the money contributed, but Ms. Clinton received 35%. 
+#4: A clear majority of Princeton money went to Ms. Clinton (about 55%), with Mr. Sanders receiving the second-most (about 15%). A few of the Republicans who were more popular among the "establishment", Jeb Bush and Marco Rubio, saw their best performance in this sample in Princeton. 
+
+```
+
+```{r gender}
+
+##this is all example code to figure out how to do this process:
+##---------------------------
+all_contbrs <- data.frame(unique(contbr_nm)) #df of unique contbrs
+colnames(all_contbrs) <- c('contbr_nm')
+all_contbrs$first_name <- apply(all_contbrs['contbr_nm'], 1,
+                                get_first_name) #only care about first names
+some_contbrs <- data.frame(head(all_contbrs, 100))
+ptm <- proc.time()
+some_contbrs$contbr_gender <- apply(some_contbrs['first_name'], 1, 
+                                    assign_contrib_gender_firstname)
+proc.time() - ptm
+
+#testing out hash functionality
+h <- hash(some_contbrs$first_name, some_contbrs$contbr_gender)
+h$LINDA
+h[['LINDA']]
+
+get_gender <- function(name, hash) {
+  return(hash[[name]])
+}
+
+some_contbrs$contbr_gender2 <- apply(some_contbrs['first_name'], 1, 
+                                     get_gender, hash = h)
+##----------------------------------------------------------
+
+#first get unique first names:
+all_contbrs <- data.frame(unique(contbr_nm)) #df of unique contbrs
+colnames(all_contbrs) <- c('contbr_nm')
+all_contbrs$first_name <- apply(all_contbrs['contbr_nm'], 1,
+                                get_first_name)
+all_firsts <- data.frame(unique(all_contbrs$first_name))
+colnames(all_firsts) <- c('first_name')
+
+#now run get gender on all of them (this will take ~30-45 minutes for ~5000 names)
+all_firsts$gender <- apply(all_firsts['first_name'], 1, 
+                                    assign_contrib_gender_firstname)
+all_firsts2 <- all_firsts[-c(3178),]
+gender_hash <- hash(all_firsts2$first_name, all_firsts2$gender)
+
+#now hash to assign to master df
+newjersey$first_name <- apply(newjersey['contbr_nm'], 1,
+                              get_first_name)
+#need to cut out the entries wihtout a first name (there are only a few)
+newjersey <- newjersey[newjersey['first_name']!='',]
+newjersey$contbr_gender <- apply(newjersey['first_name'], 1, 
+                                 get_gender, hash = gender_hash)
+newjersey$contbr_gender <- factor(newjersey$contbr_gender)
+
+##testing --------
+subnewjersey <- head(newjersey, 47600)
+subnewjersey$contbr_gender <- apply(subnewjersey['first_name'], 1,
+                                    get_gender, hash = gender_hash)
+
+subnewjersey <- newjersey[c(47550:47600),]$first_name
+names <- newjersey[newjersey['first_name']!='',]
+
+```
+
+```{r gender2}
+primaries <- subset(newjersey, election_tp == 'P2016')
+by_candidate <- group_by(primaries, cand_nm, contbr_gender)
+contb_totals_election <- summarise(by_candidate,
+                                   total = sum(contb_receipt_amt),
+                                   n = n())
+
+ggplot(aes(x = cand_nm, y = total, fill = contbr_gender), 
+       data = contb_totals_election) +
+  geom_bar(stat = 'identity', position = position_dodge()) + 
+  scale_y_continuous(labels = comma)
+
+```
+
+```{r income}
+#read in income data and subset to newjersey
+income <- read.csv('zipcode2014/14zpallnoagi.csv')
+njincome <- subset(income, STATE == 'NJ')
+#read in zipcode data
+zipcodes <- read.csv('censuszipcode.csv')
+colnames(zipcodes) <- c('zip', 'population')
+
+#make hash of zipcode data
+ziphash <- hash(zipcodes$zip, zipcodes$population)
+get_population <- function(zip, hash) {
+  return(hash[[toString(zip)]])
+}
+
+njincome$population <- apply(njincome['ZIPCODE'], 1, get_population,
+                           hash = ziphash)
+njincome <- subset(njincome, population != 'NULL')
+njincome$population <- unlist(njincome$population)
+#njincome$population <- factor(njincome$population) shouldn't factor?
+
+#get AGI per capita
+njincome$agiPC <- as.numeric(njincome$A00100)/as.numeric(njincome$population)
+
+#clean up zip codes in contribution data
+clean_zip <- function(zip) {
+  zip <- toString(zip)
+  if (nchar(zip) == 0) { #for blank rows
+    return(zip)
+  }
+  if (nchar(zip) == 9) { #zip+4 w/ non-0 leading digit
+    return(as.numeric(substr(zip, 1, 5)))
+  } else if (nchar(zip) == 8) { #zip+4 w/ 0 as leading digit
+    return(as.numeric(substr(zip, 1, 4)))
+  } else { #other stuff
+    return(as.numeric(zip))
+  }
+}
+
+#create cleaned_zips
+newjersey$cleaned_zips <- factor(apply(newjersey['contbr_zip'], 1,
+                                       clean_zip))
+
+slimnjincome <- njincome[c('ZIPCODE','A00100','population',
+                           'agiPC')]
+
+njmerged <- merge(newjersey, slimnjincome, 
+                      by.x = 'cleaned_zips', by.y = 'ZIPCODE')
+#want to defactor these:
+njmerged$population <- as.numeric(as.character(njmerged$population))
+njmerged$agiPC <- as.numeric(as.character(njmerged$agiPC))
+
+```
+
+```{r income analysis}
+#simple plot showing roughly the distro of donations in zips of each income
+ggplot(aes(x = agiPC), 
+       data = njmerged) +
+  geom_histogram(binwidth = 200) +
+  coord_cartesian(xlim = c(0, 15000))
+
+#adding in split by party
+ggplot(aes(x = agiPC), 
+       data = njmerged) +
+  geom_histogram(binwidth = 200, aes(fill = cand_party)) +
+  coord_cartesian(xlim = c(0, 15000))
+
+#normal plots subsetting by lower income zip codes and higher income zips
+by_candidate_low <- group_by(subset(njmerged, agiPC < 2000), cand_nm)
+contb_totals <- summarise(by_candidate_low,
+                          total = sum(contb_receipt_amt),
+                          n = n())
+
+ggplot(aes(x = cand_nm, y = total),
+       data = contb_totals) + 
+  geom_bar(stat = 'identity', position = position_dodge())
+
+##i want to see where the proportion of moeny in zips 0-10% and 90-100% is going (obv total will be higher in 90-100%). 
+#get cutoffs:
+quantile(njmerged$agiPC, prob = seq(0, 1, length = 11), type = 5)
+#will use roughly $1500 and $5000 to show 'low income' and 'high income'
+njmerged$lowincome <- (njmerged$agiPC <= 1500)
+njmerged$highincome <- (njmerged$agiPC >= 5000)
+njmerged$incomerank <- (2 - njmerged$lowincome + njmerged$highincome)
+njmerged$incomerank <- factor(njmerged$incomerank)
+
+by_candidate_income <- group_by(subset(njmerged, election_tp == 'P2016'), cand_nm, incomerank)
+income_totals <- summarise(by_candidate_income, 
+                           total = sum(contb_receipt_amt),
+                           n = n())
+
+income_split <- function(row) {
+  total <- as.numeric(row[['total']])
+  rank <- as.numeric(row[['incomerank']])
+  return(total/sum(subset(income_totals, incomerank == rank)$total))
+}
+
+income_totals$proportion <- apply(income_totals, 1, income_split)
+
+#SUCCESS
+ggplot(aes(x = cand_nm, y = proportion, fill = incomerank),
+       data = income_totals) + 
+  geom_bar(stat = 'identity', position = position_dodge())
+
+#this is perfect. takeaways:
+#Sanders by far most popular among lowest
+#Clinton support rather consistent
+#Christie and Bush are men of the rich
+#Trump also working class
+
+#now going to try the same, but with five even quintiles instead
+quantile(njmerged$agiPC, prob = seq(0, 1, length = 11), type = 5)
+
+njmerged$incomerank2 <- (njmerged$agiPC <= 1785.95)
+njmerged$incomerank2 <- njmerged$incomerank2 + (njmerged$agiPC <= 2528.81)
+njmerged$incomerank2 <- njmerged$incomerank2 + (njmerged$agiPC <= 3416.53)
+njmerged$incomerank2 <- njmerged$incomerank2 + (njmerged$agiPC <= 4566.53)
+njmerged$incomerank2 <- 5 - njmerged$incomerank2
+
+njmerged$incomerank2 <- factor(njmerged$incomerank2)
+
+by_candidate_income <- group_by(subset(njmerged, election_tp == 'P2016'), cand_nm, incomerank2)
+income_totals <- summarise(by_candidate_income, 
+                           total = sum(contb_receipt_amt),
+                           n = n())
+
+income_split <- function(row) {
+  total <- as.numeric(row[['total']])
+  rank <- as.numeric(row[['incomerank2']])
+  return(total/sum(subset(income_totals, incomerank2 == rank)$total))
+}
+
+income_totals$proportion <- apply(income_totals, 1, income_split)
+
+ggplot(aes(x = cand_nm, y = proportion, fill = incomerank2),
+       data = income_totals) + 
+  geom_bar(stat = 'identity', position = position_dodge()) +
+  scale_fill_brewer(palette = 'greens') + 
+  theme(panel.background = element_rect(fill = 'rosybrown1'))
+
+```
+
+```{r more gender stuff}
+primaries <- subset(njmerged, election_tp == 'P2016')
+by_candidate <- group_by(primaries, cand_nm, contbr_gender)
+contb_totals_election <- summarise(by_candidate,
+                                   total = sum(contb_receipt_amt),
+                                   n = n())
+
+ggplot(aes(x = cand_nm, y = total, fill = contbr_gender), 
+       data = contb_totals_election) +
+  geom_bar(stat = 'identity', position = position_dodge()) + 
+  scale_y_continuous(labels = comma)
+
+#this shows total giving by gender. it isn't super useful, because it's clear that the women in the sample have given less overall. but we can see that women have given more to clinton, but are "outdone" by men in all of the others
+
+#skipping right to the end, let's look at republican candidates only, and proportions by gender
+by_republican_candidate_gender <- group_by(subset(primaries, cand_party == 'Republican'), cand_nm, contbr_gender)
+comb_totals_republican <- summarise(by_republican_candidate_gender,
+                                   total = sum(contb_receipt_amt),
+                                   n = n())
+
+republican_split <- function(row) {
+  total <- as.numeric(row[['total']])
+  gender <- row[['contbr_gender']]
+  return(total/sum(subset(comb_totals_republican,contbr_gender == gender)$total))
+}
+
+comb_totals_republican$proportion <- apply(comb_totals_republican, 1, republican_split)
+
+ggplot(aes(x = cand_nm, y = proportion, fill = contbr_gender), 
+       data = comb_totals_republican) +
+  geom_bar(stat = 'identity', position = position_dodge()) + 
+  scale_y_continuous(labels = comma)
+
+#assuming this is correct (i feel like i have to double-check) this is pretty astounding! there is barely any difference at all! no republican division by sex! wow!
+
+#crazy. it's real! 
+ggplot(aes(x = cand_nm, y = total, fill = contbr_gender), 
+       data = comb_totals_republican) +
+  geom_bar(stat = 'identity', position = position_dodge()) + 
+  scale_y_continuous(labels = comma)
+```
+
+```{r dates}
+summary(njmerged$contb_receipt_dt)
+ggplot(aes(x = contb_receipt_dt, y = contb_receipt_amt),
+       data = njmerged) +
+  geom_bar(stat = 'identity')
+
+by_date <- group_by(njmerged, contb_receipt_dt)
+date_totals <- summarise(by_date,
+                         total = sum(contb_receipt_amt),
+                         n = n())
+ggplot(aes(x = contb_receipt_dt, y = total),
+       data = date_totals) + 
+  geom_bar(stat = 'identity') + 
+  scale_x_date(date_breaks = '1 month') #scale x date only works with Dates
+
+#this works
+njmerged$newdates <- as.Date(njmerged$contb_receipt_dt,
+                             format = '%d-%b-%y')
+by_date <- group_by(njmerged, newdates)
+date_totals <- summarise(by_date,
+                         total = sum(contb_receipt_amt),
+                         n = n())
+ggplot(aes(x = newdates, y = total),
+       data = date_totals) + 
+  geom_bar(stat = 'identity') +
+  scale_x_date(date_breaks = '1 month',
+               date_labels = '%b %y')
+
+#that graph roughly shows donations over time
+
+```
+
+```{r switching}
+#want to look at people who gave to Republicans in the primary and then to Hillary in the general. also people who gave to Sanders in the primary and then Trump in the general.
+
+#donors to Sanders in the primary:
+berniebros <- subset(njmerged, cand_nm == 'Sanders')
+berniebrosgen <- subset(njmerged, contbr_nm %in% berniebros$contbr_nm)
+berniebrosgen <- subset(berniebrosgen, election_tp == 'G2016')
+berniebrossum <- group_by(berniebrosgen, cand_nm)
+berniegeneral <- summarise(berniebrossum, 
+                           total = sum(contb_receipt_amt),
+                           n = n())
+
+ggplot(aes(x = cand_nm, y = total),
+        data = berniegeneral) +
+  geom_bar(stat = 'identity') +
+  scale_y_continuous(labels = comma)
+
+#basically everyone from Bernie gives to Hillary
+
+#donors to non-trump Republicans in primary
+nevertrumpers <- subset(subset(njmerged, election_tp == 'P2016'), (cand_party == 'Republican' & cand_nm != 'Trump'))
+nevertrumpersgen <- subset(njmerged, contbr_nm %in% nevertrumpers$contbr_nm)
+nevertrumpersgen <- subset(nevertrumpersgen, election_tp == 'G2016')
+nevertrumperssum <- group_by(nevertrumpersgen, cand_nm)
+nevertrumpersgeneral <- summarise(nevertrumperssum,
+                                  total = sum(contb_receipt_amt),
+                                  n = n())
+
+ggplot(aes(x = cand_nm, y = total),
+       data = nevertrumpersgeneral) +
+  geom_bar(stat = 'identity')
+
+#confusing b/c it shows a lot of donations to non-trump republicans, not sure how that's possible. perhaps i should subset to the point where trump was officially nominated?
+
+nevertrumpersgen <- subset(nevertrumpersgen, newdates >= '2016-05-04')
+nevertrumperssum <- group_by(nevertrumpersgen, cand_nm)
+nevertrumpersgeneral <- summarise(nevertrumperssum,
+                                  total = sum(contb_receipt_amt),
+                                  n = n())
+ggplot(aes(x = cand_nm, y = total),
+       data = nevertrumpersgeneral) +
+  geom_bar(stat = 'identity')
+
+#this is better; now shows 4 candidates (no Stein) + refunds to Rubio and Cruz, which i will eliminate in the bigger dataset later. there is a solid amount of Clinton cash! more than 50% of trump total
+
+#now let's look back and see who the Clinton donors were giving to in the primary
+republicantoclinton <- subset(nevertrumpersgen, cand_nm == 'Clinton')
+rtcprimaries <- subset(njmerged, election_tp == 'P2016' &
+                         contbr_nm %in% republicantoclinton$contbr_nm)
+rtcgrouped <- group_by(rtcprimaries, cand_nm)
+rtcsums <- summarise(rtcgrouped,
+                     total = sum(contb_receipt_amt),
+                     n = n())
+
+ggplot(aes(x = cand_nm, y = total),
+       data = rtcsums) +
+  geom_bar(stat = 'identity')
+
+#there is a lot of Clinton in here; maybe people started to give to Clinton earlier? maybe i need a stronger unique identifier for donors? (there could be duplicate names)
+
+```
+
+
+# Univariate Plots Section
+```{r echo=FALSE, Univariate_Plots}
+
+
+```
+
+# Univariate Analysis
+
+### What is the structure of your dataset?
+
+### What is/are the main feature(s) of interest in your dataset?
+
+### What other features in the dataset do you think will help support your investigation into your feature(s) of interest?
+
+### Did you create any new variables from existing variables in the dataset?
+
+### Of the features you investigated, were there any unusual distributions? Did you perform any operations on the data to tidy, adjust, or change the form of the data? If so, why did you do this?
+
+
+
+# Bivariate Plots Section
+```{r echo=FALSE, Bivariate_Plots}
+
+```
+
+# Bivariate Analysis
+
+### Talk about some of the relationships you observed in this part of the investigation. How did the feature(s) of interest vary with other features in the dataset?
+
+### Did you observe any interesting relationships between the other features (not the main feature(s) of interest)?
+
+### What was the strongest relationship you found?
+
+
+
+
+# Multivariate Plots Section
+
+```{r echo=FALSE, Multivariate_Plots}
+
+```
+
+# Multivariate Analysis
+
+### Talk about some of the relationships you observed in this part of the investigation. Were there features that strengthened each other in terms of looking at your feature(s) of interest?
+
+### Were there any interesting or surprising interactions between features?
+
+### OPTIONAL: Did you create any models with your dataset? Discuss the strengths and limitations of your model.
+
+------
+
+# Final Plots and Summary
+
+### Plot One
+```{r echo=FALSE, Plot_One}
+
+```
+
+### Description One
+
+
+### Plot Two
+```{r echo=FALSE, Plot_Two}
+
+```
+
+### Description Two
+
+
+### Plot Three
+```{r echo=FALSE, Plot_Three}
+
+```
+
+### Description Three
+
+------
+```{r sources}
+
+#zipcode: https://blog.splitwise.com/2013/09/18/the-2010-us-census-population-by-zip-code-totally-free/
+#income: https://www.irs.gov/uac/soi-tax-stats-individual-income-tax-statistics-zip-code-data-soi
+
+
+```
+
+# Reflection
